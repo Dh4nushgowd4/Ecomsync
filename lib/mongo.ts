@@ -59,49 +59,36 @@ export interface RuleBreakdown {
 // MongoDB singleton
 // ---------------------------------------------------------------------------
 
-const MONGODB_URI = process.env.MONGODB_URI!;
-const DB_NAME = process.env.MONGODB_DB_NAME ?? "ecomsync";
-
-// Cache the promise across Next.js hot-reloads in development
-// Uses global to survive module re-evaluation
 declare global {
   // eslint-disable-next-line no-var
   var __mongoClientPromise: Promise<MongoClient> | undefined;
 }
-
-let clientPromise: Promise<MongoClient>;
-
-if (!MONGODB_URI) {
-  // Defer the error to runtime — allows `next build` to succeed without env vars
-  clientPromise = Promise.reject(
-    new Error("MONGODB_URI environment variable is not set.")
-  );
-} else if (process.env.NODE_ENV === "development") {
-  // In development, re-use the client across HMR cycles
-  if (!global.__mongoClientPromise) {
-    const client = new MongoClient(MONGODB_URI);
-    global.__mongoClientPromise = client.connect();
-  }
-  clientPromise = global.__mongoClientPromise;
-} else {
-  // In production, create a new client per serverless invocation lifecycle
-  const client = new MongoClient(MONGODB_URI, {
-    maxPoolSize: 10,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 30000,
-  });
-  clientPromise = client.connect();
-}
-
-export { clientPromise };
 
 // ---------------------------------------------------------------------------
 // Database & collection accessors
 // ---------------------------------------------------------------------------
 
 export async function getMongoDB(): Promise<Db> {
-  const client = await clientPromise;
-  return client.db(DB_NAME);
+  const uri = process.env.MONGODB_URI;
+  const dbName = process.env.MONGODB_DB_NAME ?? "ecomsync";
+  if (!uri) {
+    throw new Error("MONGODB_URI environment variable is not set.");
+  }
+  if (process.env.NODE_ENV === "development") {
+    if (!global.__mongoClientPromise) {
+      const client = new MongoClient(uri);
+      global.__mongoClientPromise = client.connect();
+    }
+    const client = await global.__mongoClientPromise;
+    return client.db(dbName);
+  }
+  const client = new MongoClient(uri, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 30000,
+  });
+  const conn = await client.connect();
+  return conn.db(dbName);
 }
 
 export async function getRawPayloadsCollection(): Promise<Collection<RawChannelPayload>> {

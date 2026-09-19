@@ -23,8 +23,8 @@ import type { ScoringResult } from "@/lib/scoring";
 // Model configuration
 // ---------------------------------------------------------------------------
 
-const PRIMARY_MODEL  = process.env.PRIMARY_MODEL  ?? "gemini-2.0-flash";
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL ?? "gemini-1.5-flash";
+const PRIMARY_MODEL  = process.env.PRIMARY_MODEL  ?? "gemini-3.6-flash";
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL ?? "gemini-3.5-flash";
 const TIMEOUT_MS     = Number(process.env.LLM_TIMEOUT_MS ?? "15000");
 
 function getModel(modelName: string) {
@@ -264,11 +264,20 @@ ${triggeredRules || "No specific rules triggered (general threshold exceeded)"}
 Please write a 2-3 sentence plain-English explanation of what likely happened and 
 what the operations team should check. Be direct and actionable.`;
 
-  return generateWithFallback({
-    traceName: "anomaly-explanation",
-    system,
-    prompt,
-    maxTokens: 200,
-    metadata: { sku, channelName, score },
-  });
+  try {
+    return await generateWithFallback({
+      traceName: "anomaly-explanation",
+      system,
+      prompt,
+      maxTokens: 200,
+      metadata: { sku, channelName, score },
+    });
+  } catch (err) {
+    const fallbackText = `[Severity Score ${score}/100] High anomaly detected for SKU ${sku} on ${channelName}. Delta of ${delta} resulted in a channel quantity of ${resultingQuantity} relative to base quantity ${baseQuantity}.\nTriggered Rules:\n${triggeredRules}`;
+    return {
+      text: fallbackText,
+      modelUsed: "rule-engine-fallback",
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    };
+  }
 }

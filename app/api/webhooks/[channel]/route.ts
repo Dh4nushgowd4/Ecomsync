@@ -19,7 +19,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { inngest } from "@/inngest/client";
 import { getSupabaseClient, getProductBySku, getChannelInventory, upsertChannelInventory, insertSyncEvent } from "@/lib/supabase";
-import { broadcastInventoryUpdate } from "@/lib/pusher";
+import { broadcastInventoryUpdate, broadcastAnomalyAlert } from "@/lib/pusher";
+import { computeAnomalyScore } from "@/lib/scoring";
+import { generateAnomalyExplanation } from "@/lib/ai/fallback";
+import { saveAnomalySnapshot } from "@/lib/mongo";
 
 export const runtime = "nodejs";
 
@@ -171,8 +174,58 @@ export async function POST(
             version: (currentInv?.version ?? 0) + 1,
             syncedAt: webhookTimestamp,
           });
+
+          // Evaluate anomaly score
+          const scoreResult = computeAnomalyScore({
+            delta,
+            resultingQuantity: newQty,
+            baseQuantity: product.base_quantity,
+            recentEvents: [],
+            channelId: channelRow.id,
+          });
+
+          if (scoreResult.score >= 60) {
+            const explanationResult = await generateAnomalyExplanation({
+              sku,
+              channelName,
+              delta,
+              resultingQuantity: newQty,
+              baseQuantity: product.base_quantity,
+              score: scoreResult.score,
+              scoringResult: scoreResult,
+            });
+
+            const snapshotId = await saveAnomalySnapshot({
+              product_id: product.id,
+              channel_id: channelRow.id,
+              sku,
+              channel_name: channelName,
+              score: scoreResult.score,
+              rule_breakdown: scoreResult.rules,
+              explanation: explanationResult.text,
+              llm_model: explanationResult.modelUsed,
+              full_state_snapshot: {
+                channel_inventory: { quantity: newQty, sku },
+                recent_sync_events: [],
+                product: { id: product.id, name: product.name, base_quantity: product.base_quantity },
+              },
+              created_at: new Date(),
+            });
+
+            await broadcastAnomalyAlert({
+              snapshotId,
+              sku,
+              productName: product.name,
+              channelName,
+              score: scoreResult.score,
+              explanation: explanationResult.text,
+              llmModel: explanationResult.modelUsed,
+              ruleBreakdown: scoreResult.rules,
+              detectedAt: webhookTimestamp,
+            });
+          }
         } catch (pushErr) {
-          console.warn("[webhook] Pusher broadcast error:", pushErr);
+          console.warn("[webhook] Broadcast or anomaly evaluation warning:", pushErr);
         }
       }
     } catch (dbErr) {
