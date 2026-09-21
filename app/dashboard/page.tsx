@@ -170,8 +170,11 @@ export default function DashboardPage() {
     }
   }, [messages]);
 
-  // ── Fetch initial inventory ───────────────────────────────────────────────
-  useEffect(() => {
+  const [isSeeding, setIsSeeding] = useState(false);
+
+  // ── Fetch inventory helper ────────────────────────────────────────────────
+  const loadInventory = useCallback(() => {
+    setIsLoading(true);
     fetch("/api/inventory")
       .then((r) => r.json())
       .then((data) => {
@@ -180,6 +183,24 @@ export default function DashboardPage() {
       })
       .catch(() => setIsLoading(false));
   }, []);
+
+  // ── 1-Click Seed Handler ─────────────────────────────────────────────────
+  const handleSeed = async () => {
+    try {
+      setIsSeeding(true);
+      const res = await fetch("/api/seed", { method: "POST" });
+      if (!res.ok) throw new Error("Seed request failed");
+      loadInventory();
+    } catch (err) {
+      console.error("[Seed] Failed to seed database:", err);
+    } finally {
+      setIsSeeding(false);
+    }
+  };
+
+  useEffect(() => {
+    loadInventory();
+  }, [loadInventory]);
 
   // ── Pusher real-time subscription ────────────────────────────────────────
   useEffect(() => {
@@ -344,7 +365,36 @@ export default function DashboardPage() {
                 </div>
               ) : grouped.size === 0 ? (
                 <div className={styles.emptyState}>
-                  <p>No inventory data. Run the seed script first.</p>
+                  <p style={{ fontWeight: 600, fontSize: "16px", marginBottom: "8px" }}>
+                    No inventory data found in Supabase.
+                  </p>
+                  <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginBottom: "20px" }}>
+                    Seed the database with sample products across Shopify, Amazon, and eBay.
+                  </p>
+                  <button
+                    onClick={handleSeed}
+                    disabled={isSeeding}
+                    style={{
+                      padding: "10px 22px",
+                      background: "linear-gradient(135deg, #6366f1 0%, #4f46e5 100%)",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: "8px",
+                      fontWeight: 600,
+                      fontSize: "14px",
+                      cursor: isSeeding ? "not-allowed" : "pointer",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      marginBottom: "16px",
+                      boxShadow: "0 0 16px rgba(99, 102, 241, 0.4)",
+                    }}
+                  >
+                    {isSeeding ? "🌱 Seeding Database..." : "🌱 Seed Demo Inventory (1-Click)"}
+                  </button>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "8px" }}>
+                    Or seed via terminal:
+                  </p>
                   <code>npx tsx scripts/seed.ts</code>
                 </div>
               ) : (
