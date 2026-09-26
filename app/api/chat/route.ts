@@ -150,16 +150,30 @@ const inventoryTools = {
     description: "Retrieve recently detected inventory anomalies.",
     parameters: z.object({
       limit: z.number().optional().describe("Max anomalies to return (default 10)"),
+      minScore: z.number().optional().describe("Minimum anomaly score filter (0-100)"),
     }),
-    execute: async ({ limit = 10 }) => {
-      const db = getSupabaseClient();
-      const { data, error } = await db
-        .from("anomaly_snapshots")
-        .select("sku,product_name,channel_name,anomaly_score,explanation,detected_at")
-        .order("detected_at", { ascending: false })
-        .limit(limit);
-      if (error) throw new Error(error.message);
-      return { anomalies: data ?? [], count: data?.length ?? 0 };
+    execute: async ({ limit = 10, minScore = 0 }) => {
+      const { getAnomalySnapshotsCollection } = await import("@/lib/mongo");
+      const col = await getAnomalySnapshotsCollection();
+      const filter = minScore > 0 ? { score: { $gte: minScore } } : {};
+      const data = await col
+        .find(filter)
+        .sort({ created_at: -1 })
+        .limit(limit)
+        .toArray();
+      return {
+        anomalies: data.map((d) => ({
+          id: d._id?.toHexString(),
+          sku: d.sku,
+          channelName: d.channel_name,
+          score: d.score,
+          explanation: d.explanation,
+          llmModel: d.llm_model,
+          ruleBreakdown: d.rule_breakdown,
+          detectedAt: d.created_at?.toISOString?.() ?? String(d.created_at),
+        })),
+        count: data.length,
+      };
     },
   }),
 };

@@ -227,9 +227,20 @@ export default function DashboardPage() {
     }
   };
 
+  // ── Fetch historical anomalies from MongoDB via API ─────────────────────
+  const loadAnomalies = useCallback(() => {
+    fetch("/api/anomalies?limit=50")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data)) setAnomalies(data);
+      })
+      .catch((err) => console.warn("[Anomalies] Failed to load:", err));
+  }, []);
+
   useEffect(() => {
     loadInventory();
-  }, [loadInventory]);
+    loadAnomalies();
+  }, [loadInventory, loadAnomalies]);
 
   // ── Pusher real-time subscription ────────────────────────────────────────
   useEffect(() => {
