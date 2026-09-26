@@ -2,11 +2,11 @@
  * app/api/chat/route.ts
  *
  * Streaming tool-calling chat API route.
- * Uses a custom agentic loop because Gemini doesn't auto-continue after tool calls.
- * Powered by Vercel AI SDK + @ai-sdk/google.
+ * Uses createUIMessageStream (ai v7) so the @ai-sdk/react useChat hook
+ * can parse the response correctly.
  */
 
-import { generateText, tool } from "ai";
+import { generateText, tool, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import { google } from "@ai-sdk/google";
 import { NextRequest } from "next/server";
 import { getLangfuse } from "@/lib/langfuse";
@@ -16,8 +16,8 @@ import { z } from "zod";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const PRIMARY_MODEL  = process.env.PRIMARY_MODEL  ?? "gemini-3.6-flash";
-const FALLBACK_MODEL = process.env.FALLBACK_MODEL ?? "gemini-3.5-flash";
+const PRIMARY_MODEL  = process.env.PRIMARY_MODEL  ?? "gemini-3.8-flash";
+const FALLBACK_MODEL = process.env.FALLBACK_MODEL ?? "gemini-2.0-flash-lite";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -41,7 +41,6 @@ function isEmptyOutputError(err: unknown): boolean {
   return msg.includes("must contain either output text or tool calls") || msg.includes("output text or tool");
 }
 
-// Retry on transient errors (5xx, network, empty output), but NOT on rate limits (cascade instead)
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 2): Promise<T> {
   for (let i = 0; i < maxRetries; i++) {
     try {
@@ -75,7 +74,7 @@ Be concise, precise, and actionable. Format numbers clearly.
 Available channels: shopify, amazon, ebay, walmart, etsy`;
 
 // ---------------------------------------------------------------------------
-// Tool definitions (with execute handlers)
+// Tool definitions
 // ---------------------------------------------------------------------------
 
 const inventoryTools = {
@@ -166,7 +165,7 @@ const inventoryTools = {
 };
 
 // ---------------------------------------------------------------------------
-// Custom agentic loop: runs tool calls then gets a text answer
+// Agentic loop: run tool calls then get a text answer
 // ---------------------------------------------------------------------------
 
 async function runAgentLoop(
@@ -192,16 +191,14 @@ async function runAgentLoop(
     }
 
     if (result.finishReason === "tool-calls" && result.toolCalls?.length) {
-      // Append the assistant's tool-call turn (from response.messages)
       messages = [...messages, ...result.response.messages];
 
-      // Execute each tool and append tool results in SDK v7 format
       const toolResultContent = await Promise.all(
         result.toolCalls.map(async (tc) => {
           const toolFn = inventoryTools[tc.toolName as keyof typeof inventoryTools];
           let output: unknown;
           try {
-            // @ts-ignore — dynamic call with typed args
+            // @ts-ignore
             output = await toolFn.execute(tc.input as any, { messages, toolCallId: tc.toolCallId });
           } catch (err) {
             output = { error: String(err) };
@@ -226,14 +223,14 @@ async function runAgentLoop(
 }
 
 // ---------------------------------------------------------------------------
-// POST handler — streams the final answer after the agentic loop
+// POST handler — uses createUIMessageStream (ai v7 protocol)
 // ---------------------------------------------------------------------------
 
 export async function POST(req: NextRequest) {
   const langfuse = getLangfuse();
   const body = await req.json();
 
-  // Convert UIMessage array → simple CoreMessage array for the agentic loop
+  // Support both UIMessage format (parts[]) and legacy (content string)
   const uiMessages: Array<{
     role: string;
     parts?: Array<{ type: string; text?: string }>;
@@ -247,36 +244,26 @@ export async function POST(req: NextRequest) {
         ? m.parts.filter((p) => p.type === "text").map((p) => p.text ?? "").join("")
         : m.content ?? "",
     }))
-    .filter((m) => m.content.trim().length > 0);
+    .filter((m) => (m.role === "user" || m.role === "assistant") && m.content.trim().length > 0);
 
-  const trace = langfuse.trace({
-    name: "chat-session",
-    input: messages,
-  });
-
+  const trace = langfuse.trace({ name: "chat-session", input: messages });
   const startMs = Date.now();
-
-  async function tryModel(modelId: string): Promise<string> {
-    return runAgentLoop(modelId, [...messages]);
-  }
 
   let finalText = "";
   let modelUsed = PRIMARY_MODEL;
 
   try {
-    finalText = await tryModel(PRIMARY_MODEL);
+    finalText = await runAgentLoop(PRIMARY_MODEL, [...messages]);
   } catch (primaryErr) {
-    const isExhausted = isRateLimitError(primaryErr) || isModelUnavailableError(primaryErr);
-    console.warn(`Primary model (${PRIMARY_MODEL}) failed (exhausted=${isExhausted}):`, String((primaryErr as any)?.message ?? "").slice(0, 120));
+    console.warn(`Primary model (${PRIMARY_MODEL}) failed:`, String((primaryErr as any)?.message ?? "").slice(0, 120));
     modelUsed = FALLBACK_MODEL;
     try {
-      finalText = await tryModel(FALLBACK_MODEL);
+      finalText = await runAgentLoop(FALLBACK_MODEL, [...messages]);
     } catch (fallbackErr) {
-      const isRateErr = isRateLimitError(fallbackErr);
-      if (isRateErr) {
-        finalText = "⚠️ The AI quota for today has been exhausted on both models. This is a free-tier limit (20 requests/day per model). Please try again tomorrow, or add billing to your Google AI Studio project for unlimited access.";
+      if (isRateLimitError(fallbackErr)) {
+        finalText = "⚠️ The AI quota has been exhausted. Please try again later or add billing to your Google AI Studio project.";
       } else {
-        finalText = "I'm having trouble connecting to the AI service right now. Please try again in a moment.";
+        finalText = `I'm having trouble connecting to the AI service right now. Error: ${String((fallbackErr as any)?.message ?? "unknown")}`;
       }
       console.error("Both models failed:", fallbackErr);
     }
@@ -296,32 +283,31 @@ export async function POST(req: NextRequest) {
   trace.update({ output: finalText });
   langfuse.flushAsync().catch(() => {});
 
-  // Return the final answer as a plain data stream — no extra model call needed
-  const encoder = new TextEncoder();
-  const responseBody = new ReadableStream({
-    start(controller) {
-      const lines = [
-        `data: ${JSON.stringify({ type: "start" })}\n\n`,
-        `data: ${JSON.stringify({ type: "start-step" })}\n\n`,
-        `data: ${JSON.stringify({ type: "text-start", id: "0" })}\n\n`,
-        `data: ${JSON.stringify({ type: "text-delta", id: "0", delta: finalText })}\n\n`,
-        `data: ${JSON.stringify({ type: "text-end", id: "0" })}\n\n`,
-        `data: ${JSON.stringify({ type: "finish-step" })}\n\n`,
-        `data: ${JSON.stringify({ type: "finish", finishReason: "stop" })}\n\n`,
-        `data: [DONE]\n\n`,
-      ];
-      for (const line of lines) {
-        controller.enqueue(encoder.encode(line));
-      }
-      controller.close();
+  // Stream the reply using the ai v7 UIMessageStream protocol
+  // that useChat from @ai-sdk/react knows how to parse.
+  const stream = createUIMessageStream({
+    execute: ({ writer }) => {
+      writer.write({
+        type: "text-start",
+        id: "msg-0",
+      } as any);
+      writer.write({
+        type: "text-delta",
+        id: "msg-0",
+        delta: finalText,
+      } as any);
+      writer.write({
+        type: "text-end",
+        id: "msg-0",
+      } as any);
+      writer.write({
+        type: "finish-message",
+        messageId: "msg-" + Date.now(),
+        finishReason: "stop",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      } as any);
     },
   });
 
-  return new Response(responseBody, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-    },
-  });
+  return createUIMessageStreamResponse({ stream });
 }

@@ -147,8 +147,8 @@ export default function DashboardPage() {
   // v7 removed input/handleInputChange/handleSubmit — manage input manually
   const { messages, sendMessage, status } = (useChat as any)({
     api: "/api/chat",
-    maxSteps: 5,
   });
+  // status values: "ready" | "submitted" | "streaming" | "error"
   const chatLoading = status === "streaming" || status === "submitted";
   const [chatInput, setChatInput] = useState("");
 
@@ -157,7 +157,8 @@ export default function DashboardPage() {
       e?.preventDefault();
       const text = chatInput.trim();
       if (!text || chatLoading) return;
-      (sendMessage as any)({ role: "user", content: text });
+      // sendMessage expects { text } in ai-sdk v7
+      (sendMessage as any)({ text });
       setChatInput("");
     },
     [chatInput, chatLoading, sendMessage]
@@ -171,6 +172,7 @@ export default function DashboardPage() {
   }, [messages]);
 
   const [isSeeding, setIsSeeding] = useState(false);
+  const [seedError, setSeedError] = useState<string | null>(null);
 
   // ── Fetch inventory helper ────────────────────────────────────────────────
   const loadInventory = useCallback(() => {
@@ -188,11 +190,17 @@ export default function DashboardPage() {
   const handleSeed = async () => {
     try {
       setIsSeeding(true);
+      setSeedError(null);
       const res = await fetch("/api/seed", { method: "POST" });
-      if (!res.ok) throw new Error("Seed request failed");
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const detail = body?.details ?? body?.error ?? `HTTP ${res.status}`;
+        throw new Error(detail);
+      }
       loadInventory();
-    } catch (err) {
+    } catch (err: any) {
       console.error("[Seed] Failed to seed database:", err);
+      setSeedError(err?.message ?? String(err));
     } finally {
       setIsSeeding(false);
     }
@@ -392,6 +400,20 @@ export default function DashboardPage() {
                   >
                     {isSeeding ? "🌱 Seeding Database..." : "🌱 Seed Demo Inventory (1-Click)"}
                   </button>
+                  {seedError && (
+                    <div style={{
+                      background: "rgba(239, 68, 68, 0.12)",
+                      border: "1px solid rgba(239, 68, 68, 0.35)",
+                      borderRadius: "8px",
+                      padding: "10px 14px",
+                      marginBottom: "12px",
+                      maxWidth: "420px",
+                      textAlign: "left",
+                    }}>
+                      <p style={{ fontSize: "12px", fontWeight: 600, color: "#f87171", marginBottom: "4px" }}>❌ Seed failed</p>
+                      <p style={{ fontSize: "11px", color: "#fca5a5", wordBreak: "break-all", margin: 0 }}>{seedError}</p>
+                    </div>
+                  )}
                   <p style={{ fontSize: "12px", color: "var(--text-muted)", marginTop: "8px" }}>
                     Or seed via terminal:
                   </p>
