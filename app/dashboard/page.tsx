@@ -53,6 +53,27 @@ interface LiveUpdate {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Minimal markdown → HTML for AI responses (bold, headers, bullets, blockquotes) */
+function renderMarkdown(text: string): string {
+  return text
+    // ### headers
+    .replace(/^#### (.+)$/gm, "<h4>$1</h4>")
+    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+    // **bold**
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    // *italic*
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    // > blockquote
+    .replace(/^> (.+)$/gm, "<blockquote>$1</blockquote>")
+    // bullet points — wrap consecutive <li> items in <ul>
+    .replace(/^\* (.+)$/gm, "<li>$1</li>")
+    .replace(/(<li>[\s\S]*?<\/li>)/g, (match) => `<ul>${match}</ul>`)
+    // line breaks
+    .replace(/\n{2,}/g, "</p><p>")
+    .replace(/\n/g, "<br />");
+}
+
 function scoreColor(score: number): string {
   if (score >= 80) return "#ff4444";
   if (score >= 60) return "#ff8c00";
@@ -245,7 +266,7 @@ export default function DashboardPage() {
       setInventory((prev) =>
         prev.map((item) =>
           item.sku === data.sku && item.channel_name === data.channelName
-            ? { ...item, channel_quantity: data.quantity, last_synced_at: data.syncedAt, version: data.version ?? item.version }
+            ? { ...item, channel_quantity: data.quantity, last_synced_at: data.syncedAt }
             : item
         )
       );
@@ -536,15 +557,22 @@ export default function DashboardPage() {
                     </div>
                   </div>
                 )}
-                {messages.map((m) => (
+                {(messages as any[]).map((m: any) => (
                   <div key={m.id} className={`${styles.chatMessage} ${m.role === "user" ? styles.userMessage : styles.assistantMessage}`}>
                     <div className={styles.messageRole}>{m.role === "user" ? "You" : "EcomSync AI"}</div>
                     <div className={styles.messageContent}>
-                      {(m as any).content && <span>{(m as any).content}</span>}
+                      {(m as any).content && (
+                        m.role === "assistant"
+                          ? <p dangerouslySetInnerHTML={{ __html: renderMarkdown((m as any).content) }} style={{ margin: 0 }} />
+                          : <span>{(m as any).content}</span>
+                      )}
                       {m.parts?.map((p: any, i: number) => {
-                        if (p.type === "text") return <span key={i}>{p.text}</span>;
+                        if (p.type === "text") {
+                          return m.role === "assistant"
+                            ? <p key={i} dangerouslySetInnerHTML={{ __html: renderMarkdown(p.text ?? "") }} style={{ margin: 0 }} />
+                            : <span key={i}>{p.text}</span>;
+                        }
                         if (typeof p.type === "string" && p.type.startsWith("tool-")) {
-                          // Extract tool name by removing "tool-" prefix
                           const toolName = p.type.replace("tool-", "");
                           return (
                             <div key={i} className={styles.toolBadge}>
